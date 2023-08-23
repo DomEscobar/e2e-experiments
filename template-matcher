@@ -1,0 +1,85 @@
+import finder from "@udarrr/template-matcher";
+import { centerOf, mouse, straightTo, screen, imageResource, keyboard, Point, FileType, Region } from "@nut-tree/nut-js";
+import Tesseract from "tesseract.js";
+import { preprocessImage } from "./preprocessin";
+
+const img = "public/matches/btn_add.png";
+const currentScreenimg = "public/matches";
+const currentScreenimgFull = "public/matches/reg.png";
+
+mouse.config.mouseSpeed = 9000;
+keyboard.config.autoDelayMs = 200;
+let lastResult = null;
+async function findText(text, region = false, screenshot = true) {
+
+    if (screenshot) {
+        await screen.capture("reg", FileType.PNG, currentScreenimg);
+        const img = await preprocessImage(currentScreenimgFull);
+        lastResult = await Tesseract.recognize(img as any);
+    }
+
+    const results = [];
+    for (let word of lastResult.data.words) {
+        if (word.text.includes(text)) {
+            results.push({
+                confidence: word.confidence,
+                x: word.bbox.x0,
+                y: word.bbox.y0 - 50,
+                width: word.bbox.x1 - word.bbox.x0,
+                height: word.bbox.y1 - word.bbox.y0,
+                text: word.text
+            });
+        }
+    }
+
+    if (results.length === 0) {
+        return null;
+    }
+    const best = results.sort((a, b) => b.confidence - a.confidence)[0];
+
+    if (region) {
+        return new Region(best.x, best.y, best.width, best.height);
+    }
+
+    return new Point(best.x, best.y)
+}
+
+async function main() {
+    console.log("start");
+    try {
+
+        // const matcheWithScreen = await finder.findMatch({ needle: img });
+
+        // await mouse.move(straightTo(centerOf(matcheWithScreen.location)));
+        // await mouse.leftClick();
+        // await keyboard.type("Microsoft To Do");
+        // await keyboard.pressKey(Key.Enter);
+        // await keyboard.releaseKey(Key.Enter);
+
+        // const textRegion = await findText("Tag", true);
+        // await mouse.move(straightTo(centerOf(textRegion as Region)));
+
+        // await mouse.leftClick();
+
+        const matcheWithScreen = await finder.findMatch({ needle: img });
+        await mouse.move(straightTo(centerOf(matcheWithScreen.location)));
+
+        // const textRegion2 = await findText("Aufgabe hinz", true, true);
+        // await mouse.move(straightTo(centerOf(textRegion2 as Region)));
+
+    } catch (e) {
+        console.log(e);
+    }
+
+}
+
+async function test2() {
+    await mouse.move(straightTo(centerOf(screen.find(imageResource(img)))));
+
+}
+
+
+main().then((e) => {
+    console.log(e, "done");
+});
+
