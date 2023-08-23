@@ -1,4 +1,5 @@
 import cv from '@techstark/opencv-js';
+import { writeFileSync } from "fs";
 const { Canvas, createCanvas, Image, ImageData, loadImage, OffscreenCanvas } = require('canvas');
 import sharp from "sharp";
 import Tesseract from 'tesseract.js';
@@ -22,17 +23,33 @@ async function processImage(imagePath) {
         console.log(cv.getBuildInformation())
 
         const image = await loadImage(imagePath);
-
         let src = cv.imread(image);
-        let grayscale = new cv.Mat();
-        let binary = new cv.Mat();
         let contours: any = new cv.MatVector();
+
+        let grayscale = new cv.Mat();
+        let edges = new cv.Mat();
+        let dilated = new cv.Mat();
+        let adaptiveThresh = new cv.Mat();
+        let combined = new cv.Mat();
         let hierarchy = new cv.Mat();
 
         cv.cvtColor(src, grayscale, cv.COLOR_RGBA2GRAY, 0);
-        cv.threshold(grayscale, binary, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
 
-        cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        // Enhance contrast
+        let clahe = new cv.CLAHE();
+        clahe.apply(grayscale, grayscale);
+
+        cv.Canny(grayscale, edges, 50, 150, 3, false);
+        cv.adaptiveThreshold(grayscale, adaptiveThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 11, 2);
+
+        // Combine results
+        cv.bitwise_or(edges, adaptiveThresh, combined);
+
+        let M = cv.Mat.ones(5, 5, cv.CV_8U);
+        cv.dilate(combined, dilated, M);
+
+        cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
 
         let labels = [];
         let fields = [];
@@ -40,28 +57,47 @@ async function processImage(imagePath) {
             let contour = contours.get(i);
             let rect = cv.boundingRect(contour);
 
-            if (rect.width > 100 && rect.height > 20) {
+            if (rect.width > 10 && rect.height > 5) {
+                console.log("rect me");
+                let point1 = new cv.Point(rect.x, rect.y);
+                let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
+                cv.rectangle(src, point1, point2, [255, 0, 0, 255], 2);
+
                 fields.push(rect);
-            } else {
-                let roi = grayscale.roi(rect);
-                // Convert the ROI to a buffer using canvas
-                const canvas = createCanvas(rect.width, rect.height);
+
+                // cutout part of image to get text
+                const canvas = createCanvas(image.width, image.height);
                 const ctx = canvas.getContext('2d');
-                const imageData = ctx.createImageData(rect.width, rect.height);
+                ctx.drawImage(image, 0, 0);
+                let cutout = ctx.getImageData(rect.x, rect.y, rect.width, rect.height);
 
-                roi.data.forEach((val, idx) => {
-                    imageData.data[idx] = val;
-                });
+                let newCanvas = createCanvas(cutout.width, cutout.height);
+                const newCtx = newCanvas.getContext('2d');
+                newCtx.putImageData(cutout, 0, 0);
 
-                ctx.putImageData(imageData, 0, 0);
-                const buffer = canvas.toBuffer('image/png');
+                //resize if smaller than 200px
+                if (newCanvas.width < 200) {
+                    const resizeFactor = 200 / newCanvas.width;
+                    const newWidth = newCanvas.width * resizeFactor;
+                    const newHeight = newCanvas.height * resizeFactor;
+                    const newCanvas2 = createCanvas(newWidth, newHeight);
+                    const newCtx2 = newCanvas2.getContext('2d');
+                    newCtx2.drawImage(newCanvas, 0, 0, newWidth, newHeight);
+                    newCanvas = newCanvas2;
+                }
 
-                let labelText = await Tesseract.recognize(buffer);
-                labels.push({ text: labelText, rect: rect });
+                let buffer = newCanvas.toBuffer('image/jpeg');
+                writeFileSync('public/pici/output' + i + '.jpg', buffer);
+
+                let labelText = await Tesseract.recognize(buffer, undefined);
+                console.log("label me", labelText.data.text);
             }
         }
 
         let associations = [];
+        const canvas = createCanvas(src.cols, src.rows);
+        cv.imshow(canvas, src);
+        writeFileSync('public/output.jpg', canvas.toBuffer('image/jpeg'));
 
         for (let label of labels) {
             for (let field of fields) {
@@ -76,7 +112,6 @@ async function processImage(imagePath) {
 
         src.delete();
         grayscale.delete();
-        binary.delete();
         contours.delete();
         hierarchy.delete();
 
@@ -103,7 +138,7 @@ async function test() {
 }
 
 test().then(() => {
-    processImage('public/saved.png').then(result => {
+    processImage('public/todotest.png').then(result => {
         console.log(result);
         // for (let association of result) {
         //     console.log(`Field at ${JSON.stringify(association.fieldRect)} is labeled as '${association.labelText.trim()}'`);
