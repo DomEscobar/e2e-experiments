@@ -1,0 +1,265 @@
+import finder from "@udarrr/template-matcher";
+import { centerOf, mouse, straightTo, screen, imageResource, keyboard, Point, FileType, Region, Key, sleep } from "@nut-tree/nut-js";
+import { createWorker } from "tesseract.js";
+import robot from "@jitsi/robotjs";
+import vision from "@google-cloud/vision"
+
+const currentScreenimg = "public/matchers";
+const currentScreenimgFull = "public/matchers/reg.png";
+
+robot.setKeyboardDelay(3);
+mouse.config.mouseSpeed = 7000;
+keyboard.config.autoDelayMs = 200;
+let lastResult = null;
+let worker = null;
+let bgWorker = null;
+let bgInterval = null;
+let lastScreenDateTime = null;
+let useScreenFetchingType: "Google" | "Local" = "Google"
+
+export function UiGetLastScreenTexts() {
+    return lastResult;
+}
+
+export function setScreenFetchingType(type) {
+    useScreenFetchingType = type
+}
+
+function startAutoFetch() {
+    bgInterval = setTimeout(async () => {
+        await fetchUiTexts(bgWorker);
+        lastScreenDateTime = new Date();
+        startAutoFetch();
+    }, 1000);
+}
+
+export async function UiStartAutoScreening(langs: string) {
+    bgWorker = await createWorker();
+    await bgWorker.loadLanguage(langs);
+    await bgWorker.initialize(langs);
+    startAutoFetch();
+    return bgWorker;
+}
+
+export async function UiAutomationStart(langs: string) {
+    worker = await createWorker();
+    await worker.loadLanguage(langs);
+    await worker.initialize(langs);
+    return worker;
+}
+
+export async function UiAutomationStop() {
+    await worker.terminate();
+    if (bgWorker) {
+        clearTimeout(bgInterval);
+        await bgWorker?.terminate();
+    }
+}
+
+export async function UiWriteText(text) {
+    let isCancelled = false;
+    const cancel = () => {
+        isCancelled = true;
+    };
+
+    const promise = async () => {
+        for (const char of text) {
+            if (isCancelled) {
+                console.log('Typing cancelled');
+                return;
+            }
+
+            if (char === "\n") {
+                robot.keyTap('enter');
+                await sleep(10);
+                continue;
+            }
+
+            robot.typeString(char);
+            await sleep(10);
+        }
+    };
+
+    promise.cancel = cancel;
+    await promise();
+
+    return promise;
+}
+
+
+export async function findText(text, region = false, screenshot = true) {
+
+    const results = await UiGetScreenTexts(text, screenshot);
+
+    if (results.length === 0) {
+        console.info("no text results found");
+        return null;
+    }
+
+    // best match whos text is nearest to input
+    const input = text;
+    const best = results.sort((o1, o2) => {
+        const distance1 = levenshteinDistance(input, o1.text);
+        const distance2 = levenshteinDistance(input, o2.text);
+        return distance1 - distance2;
+    })[0]
+
+    if (region) {
+        return new Region(best.x, best.y, best.width, best.height);
+    }
+
+    return new Point(best.x, best.y)
+}
+
+export async function UiGetScreenTexts(filter = null, screenshot = true) {
+    if (screenshot) {
+        await fetchUiTexts(worker);
+    }
+
+    const scale = await screenScale();
+    let words = lastResult;
+    if (filter) {
+        words = words.filter(o => o.text.toLowerCase().includes(filter.toLowerCase()));
+    }
+    console.log("FOUND", words)
+    const results = [];
+    for (let word of words) {
+        const x1 = word.bbox.x0 * scale.x;
+        const y1 = word.bbox.y0 * scale.y;
+        results.push({
+            confidence: word.confidence,
+            x: x1,
+            y: y1,
+            width: word.bbox.x1 - word.bbox.x0,
+            height: word.bbox.y1 - word.bbox.y0,
+            text: word.text
+        });
+    }
+
+    return results;
+}
+
+export const UiMoveMouseToText = async (text) => {
+    const textRegion = (await findText(text, true)) as Region;
+
+    if (!textRegion) {
+        return false;
+    }
+
+    await mouse.move(straightTo(centerOf(textRegion as Region)));
+
+    return true;
+}
+
+export const UiClickText = async (text) => {
+    const textRegion = await findText(text, true);
+
+    if (!textRegion) {
+        return false;
+    }
+
+    await mouse.move(straightTo(centerOf(textRegion as Region)));
+    await mouse.leftClick();
+
+    return true;
+}
+
+export const UiMouseClick = () => mouse.leftClick();
+
+export const UiMoveMouseToImage = async (needle, multiple = false, haystack = null) => {
+
+    const matchReq = {
+        confidence: 0.7,
+        needle,
+        haystack,
+        providerData: multiple ? {
+            scaleSteps: [1.5, 1.2, 1, 0.7, 0.4],
+            searchMultipleScales: true
+        } : undefined
+    };
+
+    const matcheWithScreen = await finder.findMatch(matchReq);
+
+    if (!matcheWithScreen) {
+        return false;
+    }
+
+    await mouse.move(straightTo(centerOf(matcheWithScreen.location)));
+    return true;
+}
+
+export const UiClickEnter = async () => {
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+}
+
+async function fetchUiTexts(_worker) {
+    console.time("checkUItexts")
+    await screen.capture("reg", FileType.PNG, currentScreenimg);
+
+    if (useScreenFetchingType == "Google") {
+        const client = new vision.ImageAnnotatorClient({
+            keyFilename: "public/imnokoltest-d4394174876e.json"
+        })
+        const [result] = await client.textDetection(currentScreenimgFull);
+        const texts = result.textAnnotations;
+        lastResult = texts.map(o => ({
+            text: o.description,
+            confidence: o.confidence,
+            bbox: {
+                x0: o.boundingPoly.vertices[0].x,
+                y0: o.boundingPoly.vertices[1].y,
+                x1: o.boundingPoly.vertices[0].x,
+                y1: o.boundingPoly.vertices[2].y
+            }
+        }))
+    } else {
+        const result = await _worker.recognize(currentScreenimgFull);
+        lastResult = result.data.words
+    }
+    console.timeEnd("checkUItexts")
+}
+
+async function screenScale() {
+    const imageSize = await imageResource(currentScreenimgFull);
+    const screenSize = robot.getScreenSize();
+    const screenScale = {
+        x: screenSize.width / imageSize.width,
+        y: screenSize.height / imageSize.height
+    };
+    return screenScale;
+}
+
+async function scaleImage(inputPath, outputPath, width, height) {
+    // console.time("scaleImage")
+    // const image = await loadImage(inputPath);
+
+    // const canvas = createCanvas(width, height);
+    // const ctx = canvas.getContext('2d');
+
+    // ctx.drawImage(image, 0, 0, width, height);
+
+    // const scaledImage = canvas.toBuffer('image/png');
+}
+
+function levenshteinDistance(s1, s2) {
+    const m = s1.length;
+    const n = s2.length;
+    const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+    for (let i = 0; i <= m; i++) {
+        for (let j = 0; j <= n; j++) {
+            if (i === 0) dp[i][j] = j;
+            else if (j === 0) dp[i][j] = i;
+            else if (s1[i - 1] === s2[j - 1]) dp[i][j] = dp[i - 1][j - 1];
+            else
+                dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+        }
+    }
+
+    return dp[m][n];
+}
+
+
+
+
