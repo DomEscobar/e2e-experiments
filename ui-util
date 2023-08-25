@@ -3,6 +3,7 @@ import { centerOf, mouse, straightTo, screen, imageResource, keyboard, Point, Fi
 import { createWorker } from "tesseract.js";
 import robot from "@jitsi/robotjs";
 import vision from "@google-cloud/vision"
+import { writeFileSync } from "fs";
 
 const currentScreenimg = "public/matchers";
 const currentScreenimgFull = "public/matchers/reg.png";
@@ -10,52 +11,36 @@ const currentScreenimgFull = "public/matchers/reg.png";
 robot.setKeyboardDelay(3);
 mouse.config.mouseSpeed = 7000;
 keyboard.config.autoDelayMs = 200;
-let lastResult = null;
+let lastResult: BoundingTexts[] | null = null;
 let worker = null;
 let bgWorker = null;
 let bgInterval = null;
 let lastScreenDateTime = null;
 let useScreenFetchingType: "Google" | "Local" = "Google"
 
+interface ScreenTextData {
+    text: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+interface BoundingTexts {
+    text: string;
+    bbox: {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+    }
+}
+
 export function UiGetLastScreenTexts() {
     return lastResult;
 }
 
-export function setScreenFetchingType(type) {
-    useScreenFetchingType = type
-}
-
-function startAutoFetch() {
-    bgInterval = setTimeout(async () => {
-        await fetchUiTexts(bgWorker);
-        lastScreenDateTime = new Date();
-        startAutoFetch();
-    }, 1000);
-}
-
-export async function UiStartAutoScreening(langs: string) {
-    bgWorker = await createWorker();
-    await bgWorker.loadLanguage(langs);
-    await bgWorker.initialize(langs);
-    startAutoFetch();
-    return bgWorker;
-}
-
-export async function UiAutomationStart(langs: string) {
-    worker = await createWorker();
-    await worker.loadLanguage(langs);
-    await worker.initialize(langs);
-    return worker;
-}
-
-export async function UiAutomationStop() {
-    await worker.terminate();
-    if (bgWorker) {
-        clearTimeout(bgInterval);
-        await bgWorker?.terminate();
-    }
-}
-
+// write text by using the keyboard
 export async function UiWriteText(text) {
     let isCancelled = false;
     const cancel = () => {
@@ -87,59 +72,60 @@ export async function UiWriteText(text) {
 }
 
 
-export async function findText(text, region = false, screenshot = true) {
-
-    const results = await UiGetScreenTexts(text, screenshot);
-
-    if (results.length === 0) {
-        console.info("no text results found");
-        return null;
-    }
-
-    // best match whos text is nearest to input
-    const input = text;
-    const best = results.sort((o1, o2) => {
-        const distance1 = levenshteinDistance(input, o1.text);
-        const distance2 = levenshteinDistance(input, o2.text);
-        return distance1 - distance2;
-    })[0]
-
-    if (region) {
-        return new Region(best.x, best.y, best.width, best.height);
-    }
-
-    return new Point(best.x, best.y)
-}
-
-export async function UiGetScreenTexts(filter = null, screenshot = true) {
-    if (screenshot) {
-        await fetchUiTexts(worker);
+// get all texts of the screen with their position and bounding box
+export async function UiGetScreenTexts(filter = null, refetchScreenTexts = true): Promise<ScreenTextData[]> {
+    if (refetchScreenTexts) {
+        await fetchScreenTexts(worker);
     }
 
     const scale = await screenScale();
     let words = lastResult;
     if (filter) {
-        words = words.filter(o => o.text.toLowerCase().includes(filter.toLowerCase()));
+        const splitted: string[] = filter.split(" ");
+
+        if (splitted.length == 1) {
+            words = words.filter(o => o.text.toLowerCase().includes(filter.toLowerCase()));
+        } else {
+            words = words.filter(o => splitted.some(x => o.text.toLowerCase().includes(x.toLowerCase()))); // find words that contains all splitted words
+            words = words.filter(o => o.bbox.y1 - o.bbox.y0 < 100); // filter out long words (usually not what we want
+
+            // merge words that are on the same line but length not longer than splitted words
+            const merged: BoundingTexts[] = [];
+            for (let word of words) {
+                // plus minus 10 pixels
+                const found = merged.find(o => o.bbox.y0 - 10 < word.bbox.y0 || o.bbox.y0 + 10 > word.bbox.y0);
+
+                const splittedWord = found?.text.split(" ") ?? [];
+                if (found && splittedWord.length < splitted.length && !found.text.includes(word.text)) {
+                    found.text += " " + word.text;
+                    found.bbox.x1 = word.bbox.x1 < found.bbox.x1 ? found.bbox.x1 : word.bbox.x1;
+                    found.bbox.x0 = word.bbox.x0 > found.bbox.x0 ? found.bbox.x0 : word.bbox.x0;
+                } else {
+                    merged.push(word);
+                }
+            }
+
+            words = merged;
+        }
     }
-    console.log("FOUND", words)
     const results = [];
     for (let word of words) {
         const x1 = word.bbox.x0 * scale.x;
         const y1 = word.bbox.y0 * scale.y;
         results.push({
-            confidence: word.confidence,
             x: x1,
             y: y1,
             width: word.bbox.x1 - word.bbox.x0,
             height: word.bbox.y1 - word.bbox.y0,
-            text: word.text
-        });
+            text: word.text,
+        } as ScreenTextData);
     }
 
     return results;
 }
 
-export const UiMoveMouseToText = async (text) => {
+// move the mouse to a text of the screen
+export const UiMoveMouseToText = async (text: string) => {
     const textRegion = (await findText(text, true)) as Region;
 
     if (!textRegion) {
@@ -151,7 +137,8 @@ export const UiMoveMouseToText = async (text) => {
     return true;
 }
 
-export const UiClickText = async (text) => {
+// click the left mouse button on a text of the screen
+export const UiClickText = async (text: string) => {
     const textRegion = await findText(text, true);
 
     if (!textRegion) {
@@ -164,10 +151,107 @@ export const UiClickText = async (text) => {
     return true;
 }
 
+// click the left mouse button
 export const UiMouseClick = () => mouse.leftClick();
 
-export const UiMoveMouseToImage = async (needle, multiple = false, haystack = null) => {
+// click the enter key
+export const UiClickEnter = async () => {
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+}
 
+///--------------------------------------------------------------------
+
+
+export function setScreenFetchingType(type) {
+    useScreenFetchingType = type
+}
+
+function startAutoFetch() {
+    bgInterval = setTimeout(async () => {
+        await fetchScreenTexts(bgWorker);
+        lastScreenDateTime = new Date();
+        startAutoFetch();
+    }, 1000);
+}
+
+export async function UiStartAutoScreening(langs: string) {
+    bgWorker = await createWorker();
+    await bgWorker.loadLanguage(langs);
+    await bgWorker.initialize(langs);
+    startAutoFetch();
+    return bgWorker;
+}
+
+export async function UiAutomationStart(langs: string) {
+    worker = await createWorker();
+    await worker.loadLanguage(langs);
+    await worker.initialize(langs);
+    return worker;
+}
+
+export async function UiAutomationStop() {
+    await worker.terminate();
+    if (bgWorker) {
+        clearTimeout(bgInterval);
+        await bgWorker?.terminate();
+    }
+}
+
+export async function findText(text, region = false, screenshot = true) {
+
+    const results = await UiGetScreenTexts(text, screenshot);
+
+    if (results.length === 0) {
+        console.info("no text results found");
+        return null;
+    }
+
+    const input = text;
+    const best = results.length == 1 ? results[0] : results.sort((o1, o2) => {
+        const distance1 = levenshteinDistance(input, o1.text);
+        const distance2 = levenshteinDistance(input, o2.text);
+        return distance1 - distance2;
+    })[0]
+
+    console.log("winnder", best)
+
+    if (region) {
+        return new Region(best.x, best.y, best.width, best.height);
+    }
+
+    return new Point(best.x, best.y)
+}
+
+export async function fetchScreenTexts(_worker) {
+    console.time("checkUItexts")
+    await screen.capture("reg", FileType.PNG, currentScreenimg);
+
+    if (useScreenFetchingType == "Google") {
+        const client = new vision.ImageAnnotatorClient({
+            keyFilename: "public/imnokoltest-eaa33cd44639.json"
+        })
+        const [result] = await client.textDetection(currentScreenimgFull);
+        const texts = result.textAnnotations;
+        writeFileSync("public/matchers/ocr.json", JSON.stringify(result))
+        lastResult = texts.map(o => ({
+            text: o.description,
+            bbox: {
+                x0: o.boundingPoly.vertices[0].x,
+                y0: o.boundingPoly.vertices[1].y,
+                x1: o.boundingPoly.vertices[0].x,
+                y1: o.boundingPoly.vertices[2].y
+            }
+        }))
+    } else {
+        const result = await _worker.recognize(currentScreenimgFull);
+        lastResult = result.data.words
+    }
+    console.timeEnd("checkUItexts")
+}
+
+
+export const UiMoveMouseToImage = async (needle, multiple = false, haystack = null) => {
     const matchReq = {
         confidence: 0.7,
         needle,
@@ -188,37 +272,6 @@ export const UiMoveMouseToImage = async (needle, multiple = false, haystack = nu
     return true;
 }
 
-export const UiClickEnter = async () => {
-    await keyboard.pressKey(Key.Enter);
-    await keyboard.releaseKey(Key.Enter);
-}
-
-async function fetchUiTexts(_worker) {
-    console.time("checkUItexts")
-    await screen.capture("reg", FileType.PNG, currentScreenimg);
-
-    if (useScreenFetchingType == "Google") {
-        const client = new vision.ImageAnnotatorClient({
-            keyFilename: "public/imnokoltest-d4394174876e.json"
-        })
-        const [result] = await client.textDetection(currentScreenimgFull);
-        const texts = result.textAnnotations;
-        lastResult = texts.map(o => ({
-            text: o.description,
-            confidence: o.confidence,
-            bbox: {
-                x0: o.boundingPoly.vertices[0].x,
-                y0: o.boundingPoly.vertices[1].y,
-                x1: o.boundingPoly.vertices[0].x,
-                y1: o.boundingPoly.vertices[2].y
-            }
-        }))
-    } else {
-        const result = await _worker.recognize(currentScreenimgFull);
-        lastResult = result.data.words
-    }
-    console.timeEnd("checkUItexts")
-}
 
 async function screenScale() {
     const imageSize = await imageResource(currentScreenimgFull);
@@ -259,7 +312,6 @@ function levenshteinDistance(s1, s2) {
 
     return dp[m][n];
 }
-
 
 
 
