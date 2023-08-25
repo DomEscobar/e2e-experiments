@@ -80,34 +80,38 @@ export async function UiGetScreenTexts(filter = null, refetchScreenTexts = true)
 
     const scale = await screenScale();
     let words = lastResult;
+
+    const splitted: string[] = filter?.split(" ");
+
     if (filter) {
-        const splitted: string[] = filter.split(" ");
-
-        if (splitted.length == 1) {
-            words = words.filter(o => o.text.toLowerCase().includes(filter.toLowerCase()));
-        } else {
-            words = words.filter(o => splitted.some(x => o.text.toLowerCase().includes(x.toLowerCase()))); // find words that contains all splitted words
-            words = words.filter(o => o.bbox.y1 - o.bbox.y0 < 100); // filter out long words (usually not what we want
-
-            // merge words that are on the same line but length not longer than splitted words
-            const merged: BoundingTexts[] = [];
-            for (let word of words) {
-                // plus minus 10 pixels
-                const found = merged.find(o => o.bbox.y0 - 10 < word.bbox.y0 || o.bbox.y0 + 10 > word.bbox.y0);
-
-                const splittedWord = found?.text.split(" ") ?? [];
-                if (found && splittedWord.length < splitted.length && !found.text.includes(word.text)) {
-                    found.text += " " + word.text;
-                    found.bbox.x1 = word.bbox.x1 < found.bbox.x1 ? found.bbox.x1 : word.bbox.x1;
-                    found.bbox.x0 = word.bbox.x0 > found.bbox.x0 ? found.bbox.x0 : word.bbox.x0;
-                } else {
-                    merged.push(word);
-                }
-            }
-
-            words = merged;
-        }
+        words = words.filter(o => splitted.some(x => o.text.toLowerCase().includes(x.toLowerCase()))); // find words that contains all splitted words
     }
+
+    words = words.filter(o => o.text.length < 100 && o.text.length > 3); // filter out long words and short words
+
+    // merge words that are on the same line but length not longer than splitted words
+    const merged: BoundingTexts[] = [];
+    for (let word of words) {
+        // plus minus 10 pixels on y and x not to be distant from each other
+        const found = merged.find(o =>
+            (o.bbox.y0 == word.bbox.y0 ||
+                o.bbox.y0 - 10 < word.bbox.y0 && o.bbox.y0 + 10 > word.bbox.y0) &&
+            o.bbox.x1 + 50 > word.bbox.x0
+        );
+
+        const splittedWord = found?.text.split(" ") ?? [];
+        const isMatching = filter != null ? splittedWord.length < splitted.length : true;
+
+        if (found && isMatching && !found.text.includes(word.text)) {
+            found.text += " " + word.text;
+            found.bbox.x1 = word.bbox.x1;
+        } else {
+            merged.push(word);
+        }
+
+        words = merged;
+    }
+
     const results = [];
     for (let word of words) {
         const x1 = word.bbox.x0 * scale.x;
@@ -239,7 +243,7 @@ export async function fetchScreenTexts(_worker) {
             bbox: {
                 x0: o.boundingPoly.vertices[0].x,
                 y0: o.boundingPoly.vertices[1].y,
-                x1: o.boundingPoly.vertices[0].x,
+                x1: o.boundingPoly.vertices[1].x,
                 y1: o.boundingPoly.vertices[2].y
             }
         }))
