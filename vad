@@ -1,0 +1,98 @@
+</html>
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+    <title>Audio Recorder</title>
+    <script type="text/javascript"
+            src="vad.js"></script>
+</head>
+
+<body>
+    <div id="isRecording"></div>
+    <button id="end">End</button>
+    <audio id="audioPlayer"
+           controls></audio>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        const audioPlayer = document.getElementById('audioPlayer');
+        const isRecording = document.getElementById('isRecording');
+        const endButton = document.getElementById('end');
+
+
+        endButton.addEventListener('click', () => {
+            stopRecording();
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            mediaRecorder = undefined;
+        });
+
+        // Request user's microphone access and start recording when granted
+        function startRecording(stream) {
+            try {
+                isRecording.innerHTML = 'Recording started';
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    audioChunks = [];
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    audioPlayer.src = audioUrl;
+                };
+
+                mediaRecorder.start();
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+            }
+        }
+
+        // Stop recording and release microphone access
+        function stopRecording() {
+            if (mediaRecorder.state === 'recording') {
+                isRecording.innerHTML = 'Recording stopped';
+                mediaRecorder.stop();
+            }
+        }
+
+        function startStreaming() {
+            function startUserMedia(stream) {
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                var audioContext = new AudioContext();
+                var source = audioContext.createMediaStreamSource(stream);
+
+                // Setup options
+                var options = {
+                    source: source,
+                    voice_stop: function () { console.log('voice_stop'); stopRecording(); },
+                    voice_start: function () { console.log('voice_start'); startRecording(stream); },
+                };
+
+                // Create VAD
+                var vad = new VAD(options);
+            }
+
+            navigator.getUserMedia = navigator.getUserMedia ||
+                navigator.mozGetUserMedia ||
+                navigator.webkitGetUserMedia;
+            navigator.getUserMedia({ audio: true }, startUserMedia, function (e) {
+                console.log("No live audio input in this browser: " + e);
+            });
+        }
+
+        setTimeout(() => {
+            startStreaming();
+        }, 1000)
+    </script>
+</body>
+
+</html>
