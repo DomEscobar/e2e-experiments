@@ -4,8 +4,34 @@ const activeWin = require('active-win');
 const { GlobalKeyboardListener } = require('node-global-key-listener');
 const sharp = require('sharp');
 const fs = require('fs');
+const vision = require("@google-cloud/vision");
+
+
+async function fetchScreenTextsGoogle() {
+
+    try {
+        const client = new vision.ImageAnnotatorClient({
+            keyFilename: "./imnokoltest-e512687e43b9.json"
+        })
+        const [result] = await client.textDetection("./screenshot.png");
+        const texts = result.textAnnotations;
+        return texts.map(o => ({
+            text: o.description,
+            bbox: {
+                x0: o.boundingPoly.vertices[0].x,
+                y0: o.boundingPoly.vertices[1].y,
+                x1: o.boundingPoly.vertices[1].x,
+                y1: o.boundingPoly.vertices[2].y
+            }
+        }))
+    } catch (e) {
+        console.log(e);
+    }
+}
+
 
 const captureActiveWindowText = async () => {
+    console.log(`Capturing active window text...`);
     const activeWindow = await activeWin();
 
     if (!activeWindow) {
@@ -15,6 +41,11 @@ const captureActiveWindowText = async () => {
     const { bounds } = activeWindow;
 
     const img = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
+    const cursorPosScreen = robot.getMousePos();
+    const cursorPos = {
+        x: cursorPosScreen.x - bounds.x,
+        y: cursorPosScreen.y - bounds.y
+    };
 
     // Convert the raw pixel buffer to PNG using sharp
     const pngBuffer = await sharp(img.image, {
@@ -27,12 +58,13 @@ const captureActiveWindowText = async () => {
 
     fs.writeFileSync('screenshot.png', pngBuffer);
 
-    const worker = await createWorker("eng");
-
-
-    const ret = await worker.recognize(pngBuffer);
-    let newText = ret.data.text.trim();
-    let words = ret.data.words;
+    // const worker = await createWorker("eng");
+    // const ret = await worker.recognize(pngBuffer);
+    // let newText = ret.data.text.trim();
+    // let words = ret.data.words;
+    const gCloudTest = await fetchScreenTextsGoogle();
+    let newText = gCloudTest.map(o => o.text).join(" ");
+    let words = gCloudTest;
 
     const savedTexts = JSON.parse(fs.readFileSync('text.json', 'utf8') ?? "[]");
     const latestText = savedTexts?.length > 0 ? savedTexts[savedTexts.length - 1] : { text: "" };
@@ -45,8 +77,8 @@ const captureActiveWindowText = async () => {
         for (let word of words) {
             const found = merged.find(o =>
                 (o.bbox.y0 == word.bbox.y0 ||
-                    o.bbox.y0 - 10 < word.bbox.y0 && o.bbox.y0 + 10 > word.bbox.y0) &&
-                o.bbox.x1 + 50 > word.bbox.x0
+                    o.bbox.y0 - 16 < word.bbox.y0 && o.bbox.y0 + 16 > word.bbox.y0) &&
+                o.bbox.x1 + 90 > word.bbox.x0
             );
 
             if (found && !found.text.includes(word.text)) {
@@ -72,13 +104,27 @@ const captureActiveWindowText = async () => {
             } as ScreenTextData);
         }
 
+        // text near curor 200 left and right and 100 up and down
+        const textNearCursor = results.find(o =>
+            (o.x - 200 < cursorPos.x && o.x + 200 > cursorPos.x) &&
+            (o.y - 100 < cursorPos.y && o.y + 100 > cursorPos.y)
+        );
+
+        const textNearCapturedKeys = results.length == 1 ? results[0] : results.sort((o1, o2) => {
+            const distance1 = levenshteinDistance(capturedKeys, o1.text.toLowerCase());
+            const distance2 = levenshteinDistance(capturedKeys, o2.text.toLowerCase());
+            return distance1 - distance2;
+        })
+
         savedTexts.push({
             date: new Date(), ...{
                 text_screen: newText,
-                cursor_position: robot.getMousePos(),
-                captured_keys: capturedKeys,
-                words_bounding_boxes: results,
-                hocr: ret.data.hocr
+                cursor_position: cursorPos,
+                last_written_text: capturedKeys,
+                // words_bounding_boxes: results,
+                // hocr: ret.data.hocr,
+                text_near_cursor: textNearCursor?.text,
+                textNearCapturedKeys: textNearCapturedKeys[textNearCapturedKeys.length - 1]?.text,
             }
         });
 
@@ -87,7 +133,7 @@ const captureActiveWindowText = async () => {
         console.log(`New text!!`);
     }
 
-    await worker.terminate();
+    // await worker.terminate();
 
     return newText;
 };
@@ -97,25 +143,51 @@ let capturedKeys = "";
 const keyListener = new GlobalKeyboardListener();
 
 keyListener.addListener((e) => {
-    if (e.state == "DOWN") {
-        capturedKeys += e.name + " ";
+    if (e.state.toLowerCase() != "up") {
+        return;
     }
+
+    const name = e.name.toLowerCase();
+
+    if (e.name.toLowerCase() == "backspace") {
+        capturedKeys = capturedKeys.substring(0, capturedKeys.length - 1);
+    }
+
+    if (e.name.toLowerCase() == "space") {
+        capturedKeys += " ";
+    }
+
+    if (e.name.toLowerCase() == "enter") {
+        capturedKeys += "\n";
+    }
+
+    if (e.name.toLowerCase() == "tab") {
+        capturedKeys += " ";
+    }
+
+    if (e.name.length == 1) {
+        capturedKeys += name;
+    }
+
+    debouncedCaptureActiveWindowText();
 });
 
-setInterval(async () => {
-    try {
-        const text = await captureActiveWindowText();
-        const cursorPos = robot.getMousePos();
-        console.log(`Cursor Position: (${cursorPos.x}, ${cursorPos.y})`);
-        console.log(`Captured Keystrokes: ${capturedKeys}`);
-    } catch (error) {
-        console.error('Error:', error);
-    }
-}, 3000);
+// debounce function to call captureActiveWindowText after 200ms release of key
+const debounce = (func, delay) => {
+    let debounceTimer;
+    return function () {
+        const context = this;
+        const args = arguments;
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => func.apply(context, args), delay);
+    };
+};
 
-process.on('exit', () => {
-    keyListener.stopListening();
-});
+const debouncedCaptureActiveWindowText = debounce(captureActiveWindowText, 1000);
+
+// process.on('exit', () => {
+//     keyListener.stopListening();
+// });
 
 
 interface ScreenTextData {
@@ -135,3 +207,53 @@ interface BoundingTexts {
         y1: number;
     }
 }
+
+function levenshteinDistance(s1, s2) {
+    // Tokenize the input strings into arrays of words or characters
+    const tokens1 = s1.split(" ");
+    const tokens2 = s2.split(" ");
+
+    // Count the frequency of each token in each string
+    const freq1 = {};
+    const freq2 = {};
+
+    tokens1.forEach((token) => {
+        freq1[token] = (freq1[token] || 0) + 1;
+    });
+
+    tokens2.forEach((token) => {
+        freq2[token] = (freq2[token] || 0) + 1;
+    });
+
+    // Calculate the dot product of the two frequency vectors
+    let dotProduct = 0;
+    for (const token in freq1) {
+        if (freq2[token]) {
+            dotProduct += freq1[token] * freq2[token];
+        }
+    }
+
+    // Calculate the magnitude of each frequency vector
+    let mag1 = 0;
+    let mag2 = 0;
+
+    for (const token in freq1) {
+        mag1 += freq1[token] * freq1[token];
+    }
+
+    for (const token in freq2) {
+        mag2 += freq2[token] * freq2[token];
+    }
+
+    mag1 = Math.sqrt(mag1);
+    mag2 = Math.sqrt(mag2);
+
+    // Calculate the cosine similarity
+    if (mag1 === 0 || mag2 === 0) {
+        return 0; // Handle the case of zero magnitude vectors
+    } else {
+        return dotProduct / (mag1 * mag2);
+    }
+}
+
+https://console.cloud.google.com/iam-admin/serviceaccounts/details/116760072562057985348;edit=true/keys?project=imnokoltest
