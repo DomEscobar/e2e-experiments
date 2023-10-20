@@ -1,0 +1,137 @@
+const robot = require('robotjs');
+const { createWorker } = require('tesseract.js');
+const activeWin = require('active-win');
+const { GlobalKeyboardListener } = require('node-global-key-listener');
+const sharp = require('sharp');
+const fs = require('fs');
+
+const captureActiveWindowText = async () => {
+    const activeWindow = await activeWin();
+
+    if (!activeWindow) {
+        throw new Error('No active window found');
+    }
+
+    const { bounds } = activeWindow;
+
+    const img = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
+
+    // Convert the raw pixel buffer to PNG using sharp
+    const pngBuffer = await sharp(img.image, {
+        raw: {
+            width: img.width,
+            height: img.height,
+            channels: 4
+        }
+    }).png().toBuffer();
+
+    fs.writeFileSync('screenshot.png', pngBuffer);
+
+    const worker = await createWorker("eng");
+
+
+    const ret = await worker.recognize(pngBuffer);
+    let newText = ret.data.text.trim();
+    let words = ret.data.words;
+
+    const savedTexts = JSON.parse(fs.readFileSync('text.json', 'utf8') ?? "[]");
+    const latestText = savedTexts?.length > 0 ? savedTexts[savedTexts.length - 1] : { text: "" };
+
+    if (latestText?.text != newText) {
+
+        words = words.filter(o => o.text.length < 100 && o.text.length > 3);
+
+        const merged: any[] = [];
+        for (let word of words) {
+            const found = merged.find(o =>
+                (o.bbox.y0 == word.bbox.y0 ||
+                    o.bbox.y0 - 10 < word.bbox.y0 && o.bbox.y0 + 10 > word.bbox.y0) &&
+                o.bbox.x1 + 50 > word.bbox.x0
+            );
+
+            if (found && !found.text.includes(word.text)) {
+                found.text += " " + word.text;
+                found.bbox.x1 = word.bbox.x1;
+            } else {
+                merged.push(word);
+            }
+
+            words = merged;
+        }
+
+        const results: any[] = [];
+        for (let word of words) {
+            const x1 = word.bbox.x0;
+            const y1 = word.bbox.y0;
+            results.push({
+                x: x1,
+                y: y1,
+                width: word.bbox.x1 - word.bbox.x0,
+                height: word.bbox.y1 - word.bbox.y0,
+                text: word.text,
+            } as ScreenTextData);
+        }
+
+        savedTexts.push({
+            date: new Date(), ...{
+                text_screen: newText,
+                cursor_position: robot.getMousePos(),
+                captured_keys: capturedKeys,
+                words_bounding_boxes: results,
+                hocr: ret.data.hocr
+            }
+        });
+
+        const saveText = JSON.stringify(savedTexts);
+        fs.writeFileSync('text.json', saveText);
+        console.log(`New text!!`);
+    }
+
+    await worker.terminate();
+
+    return newText;
+};
+
+let capturedKeys = "";
+
+const keyListener = new GlobalKeyboardListener();
+
+keyListener.addListener((e) => {
+    if (e.state == "DOWN") {
+        capturedKeys += e.name + " ";
+    }
+});
+
+setInterval(async () => {
+    try {
+        const text = await captureActiveWindowText();
+        const cursorPos = robot.getMousePos();
+        console.log(`Cursor Position: (${cursorPos.x}, ${cursorPos.y})`);
+        console.log(`Captured Keystrokes: ${capturedKeys}`);
+    } catch (error) {
+        console.error('Error:', error);
+    }
+}, 3000);
+
+process.on('exit', () => {
+    keyListener.stopListening();
+});
+
+
+interface ScreenTextData {
+    text: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+interface BoundingTexts {
+    text: string;
+    bbox: {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+    }
+}
