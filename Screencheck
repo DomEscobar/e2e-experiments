@@ -5,7 +5,7 @@ const { GlobalKeyboardListener } = require('node-global-key-listener');
 const sharp = require('sharp');
 const fs = require('fs');
 const vision = require("@google-cloud/vision");
-
+let capturedKeys = "";
 
 async function fetchScreenTextsGoogle() {
 
@@ -47,6 +47,7 @@ const captureActiveWindowText = async () => {
         y: cursorPosScreen.y - bounds.y
     };
 
+    console.log(`Cursor position: ${JSON.stringify(cursorPos)}`)
     // Convert the raw pixel buffer to PNG using sharp
     const pngBuffer = await sharp(img.image, {
         raw: {
@@ -71,28 +72,11 @@ const captureActiveWindowText = async () => {
 
     if (latestText?.text != newText) {
 
-        words = words.filter(o => o.text.length < 100 && o.text.length > 3);
-
-        const merged: any[] = [];
+        let results: any[] = [];
         for (let word of words) {
-            const found = merged.find(o =>
-                (o.bbox.y0 == word.bbox.y0 ||
-                    o.bbox.y0 - 16 < word.bbox.y0 && o.bbox.y0 + 16 > word.bbox.y0) &&
-                o.bbox.x1 + 90 > word.bbox.x0
-            );
 
-            if (found && !found.text.includes(word.text)) {
-                found.text += " " + word.text;
-                found.bbox.x1 = word.bbox.x1;
-            } else {
-                merged.push(word);
-            }
+            if (word.text.length > 100) continue;
 
-            words = merged;
-        }
-
-        const results: any[] = [];
-        for (let word of words) {
             const x1 = word.bbox.x0;
             const y1 = word.bbox.y0;
             results.push({
@@ -104,27 +88,82 @@ const captureActiveWindowText = async () => {
             } as ScreenTextData);
         }
 
-        // text near curor 200 left and right and 100 up and down
-        const textNearCursor = results.find(o =>
-            (o.x - 200 < cursorPos.x && o.x + 200 > cursorPos.x) &&
-            (o.y - 100 < cursorPos.y && o.y + 100 > cursorPos.y)
-        );
+        // // order results by same line +-5 and then by x position
+        // results = results.sort((o1, o2) => {
+        //     const y1 = o1.y;
+        //     const y2 = o2.y;
+        //     const x1 = o1.x;
+        //     const x2 = o2.x;
 
-        const textNearCapturedKeys = results.length == 1 ? results[0] : results.sort((o1, o2) => {
-            const distance1 = levenshteinDistance(capturedKeys, o1.text.toLowerCase());
-            const distance2 = levenshteinDistance(capturedKeys, o2.text.toLowerCase());
-            return distance1 - distance2;
-        })
+        //     if (Math.abs(y1 - y2) <= 2) {
+        //         return x1 - x2;
+        //     }
+
+        //     return y1 - y2;
+        // });
+
+
+        // find result that is closest to cursor by checking if cursor is within x and y of the result
+        let textNearCursor: ScreenTextData | undefined = undefined;
+        const cursorHeight = 20;
+        const cursorWidth = 20;
+        for (let result of results) {
+            const x1 = result.x - (result.width + cursorWidth);
+            const y1 = result.y - (result.height + cursorHeight);
+            const x2 = x1 + result.width;
+            const y2 = y1 + result.height;
+
+            if (cursorPos.x >= x1 && cursorPos.x <= x2 && cursorPos.y >= y1 && cursorPos.y <= y2) {
+                textNearCursor = result;
+                break;
+            }
+        }
+
+        console.log(`Text near cursor: ${JSON.stringify(textNearCursor)}`);
+
+        return;
+
+        // find result that is closest to captured keys starting from all words to seek a match with the captured keys then remove one word at a time until a match is found  
+        const mergedWords = results.map(o => o.text).join(" ");
+        let capturedKeysCopy = capturedKeys;
+        let foundWords = "";
+
+        while (capturedKeysCopy.length > 0) {
+            if (mergedWords.includes(capturedKeysCopy)) {
+                foundWords = capturedKeysCopy;
+                break;
+            }
+
+            capturedKeysCopy = capturedKeysCopy.substring(0, capturedKeysCopy.length - 1);
+        }
+
+        const splittedCapturedKeys = foundWords.split(" ");
+        const lastWord = splittedCapturedKeys[splittedCapturedKeys.length - 1];
+        const positionsWithLastWord = results.filter(o => o.text == lastWord).map(o => results.indexOf(o));
+
+        // iterate over positionsWithLastWord by checking if the word before  until one left
+        let exact_positions_word: ScreenTextData | undefined = undefined;
+
+        for (let i = positionsWithLastWord.length - 1; i >= 0; i--) {
+            const position = positionsWithLastWord[i];
+            const word = results[position];
+            const wordBefore = results[position - 1];
+
+            if (wordBefore && wordBefore.text == splittedCapturedKeys[splittedCapturedKeys.length - 2]) {
+                exact_positions_word = word;
+                break;
+            }
+        }
 
         savedTexts.push({
             date: new Date(), ...{
                 text_screen: newText,
                 cursor_position: cursorPos,
                 last_written_text: capturedKeys,
-                // words_bounding_boxes: results,
+                words_bounding_boxes: results,
                 // hocr: ret.data.hocr,
-                text_near_cursor: textNearCursor?.text,
-                textNearCapturedKeys: textNearCapturedKeys[textNearCapturedKeys.length - 1]?.text,
+                text_near_cursor: textNearCursor,
+                exact_positions_word: exact_positions_word,
             }
         });
 
@@ -138,7 +177,6 @@ const captureActiveWindowText = async () => {
     return newText;
 };
 
-let capturedKeys = "";
 
 const keyListener = new GlobalKeyboardListener();
 
@@ -255,5 +293,3 @@ function levenshteinDistance(s1, s2) {
         return dotProduct / (mag1 * mag2);
     }
 }
-
-https://console.cloud.google.com/iam-admin/serviceaccounts/details/116760072562057985348;edit=true/keys?project=imnokoltest
