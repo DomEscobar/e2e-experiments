@@ -6,6 +6,9 @@ const sharp = require('sharp');
 const fs = require('fs');
 const vision = require("@google-cloud/vision");
 let capturedKeys = "";
+const { imageResource } = require("@nut-tree/nut-js");
+const screenshot = require('screenshot-desktop')
+
 
 async function fetchScreenTextsGoogle() {
 
@@ -32,22 +35,54 @@ async function fetchScreenTextsGoogle() {
 
 const captureActiveWindowText = async () => {
     console.log(`Capturing active window text...`);
+
+    const mousePos = robot.getMousePos();
+    const displays = await screenshot.listDisplays();
+    /*{
+    id: '\\\\.\\DISPLAY1',
+    name: '\\\\.\\DISPLAY1',
+    top: 0,
+    right: 1920,
+    bottom: 1080,
+    left: 0,
+    dpiScale: 1.25,
+    height: 1080,
+    width: 1920
+},*/
+    const activeDisplay = displays.find((display) => {
+        return mousePos.x >= display.left && mousePos.x <= display.right && mousePos.y >= display.top && mousePos.y <= display.bottom;
+    });
+
+    console.log(`Active display: ${JSON.stringify(activeDisplay)}`);
+
+
+    // screenshot({ format: 'png' }).then((img) => {
+    //     fs.writeFileSync('screenshot2.png', img);
+    // }).catch((err) => {
+    //     console.log(err);
+    // })
+
     const activeWindow = await activeWin();
 
     if (!activeWindow) {
         throw new Error('No active window found');
     }
 
-    const { bounds } = activeWindow;
+    let { bounds } = activeWindow;
 
-    const img = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
-    const cursorPosScreen = robot.getMousePos();
-    const cursorPos = {
-        x: cursorPosScreen.x - bounds.x,
-        y: cursorPosScreen.y - bounds.y
+    const desktopScaleFactor = activeDisplay?.dpiScale ?? 1; // determine thisasdasd
+    bounds = {
+        x: bounds.x * desktopScaleFactor,
+        y: bounds.y * desktopScaleFactor,
+        width: bounds.width * desktopScaleFactor,
+        height: bounds.height * desktopScaleFactor,
     };
 
-    console.log(`Cursor position: ${JSON.stringify(cursorPos)}`)
+    console.log(`Active window: ${JSON.stringify(activeWindow)}`, bounds);
+
+    const img = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
+
+
     // Convert the raw pixel buffer to PNG using sharp
     const pngBuffer = await sharp(img.image, {
         raw: {
@@ -58,6 +93,11 @@ const captureActiveWindowText = async () => {
     }).png().toBuffer();
 
     fs.writeFileSync('screenshot.png', pngBuffer);
+    const cursorPosScreen = robot.getMousePos();
+    const cursorPos = {
+        x: ((cursorPosScreen.x * desktopScaleFactor) - bounds.x),
+        y: ((cursorPosScreen.y * desktopScaleFactor) - bounds.y)
+    };
 
     // const worker = await createWorker("eng");
     // const ret = await worker.recognize(pngBuffer);
@@ -77,12 +117,13 @@ const captureActiveWindowText = async () => {
 
             if (word.text.length > 100) continue;
 
-            const x1 = word.bbox.x0;
+            const x1 = word.bbox.x0
             const y1 = word.bbox.y0;
+            const width = (word.bbox.x1 - word.bbox.x0);
             results.push({
                 x: x1,
                 y: y1,
-                width: word.bbox.x1 - word.bbox.x0,
+                width,
                 height: word.bbox.y1 - word.bbox.y0,
                 text: word.text,
             } as ScreenTextData);
@@ -105,11 +146,9 @@ const captureActiveWindowText = async () => {
 
         // find result that is closest to cursor by checking if cursor is within x and y of the result
         let textNearCursor: ScreenTextData | undefined = undefined;
-        const cursorHeight = 20;
-        const cursorWidth = 20;
         for (let result of results) {
-            const x1 = result.x - (result.width + cursorWidth);
-            const y1 = result.y - (result.height + cursorHeight);
+            const x1 = result.x;
+            const y1 = result.y;
             const x2 = x1 + result.width;
             const y2 = y1 + result.height;
 
