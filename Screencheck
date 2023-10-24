@@ -1,22 +1,19 @@
 const robot = require('robotjs');
-const { createWorker } = require('tesseract.js');
 const activeWin = require('active-win');
 const { GlobalKeyboardListener } = require('node-global-key-listener');
 const sharp = require('sharp');
 const fs = require('fs');
 const vision = require("@google-cloud/vision");
-let capturedKeys = "";
-const { imageResource } = require("@nut-tree/nut-js");
 const screenshot = require('screenshot-desktop')
+const screenshotPath = "./screenshot.png";
+let capturedKeys = "";
 
-
-async function fetchScreenTextsGoogle() {
-
+async function proceedGoogleVision() {
     try {
         const client = new vision.ImageAnnotatorClient({
             keyFilename: "./imnokoltest-e512687e43b9.json"
         })
-        const [result] = await client.textDetection("./screenshot.png");
+        const [result] = await client.textDetection(screenshotPath);
         const texts = result.textAnnotations;
         return texts.map(o => ({
             text: o.description,
@@ -33,28 +30,14 @@ async function fetchScreenTextsGoogle() {
 }
 
 
-const captureActiveWindowText = async () => {
-    console.log(`Capturing active window text...`);
+export const getDesktopData = async (callback): Promise<any> => {
+    capturedKeys = capturedKeys.trim();
 
     const mousePos = robot.getMousePos();
     const displays = await screenshot.listDisplays();
-    /*{
-    id: '\\\\.\\DISPLAY1',
-    name: '\\\\.\\DISPLAY1',
-    top: 0,
-    right: 1920,
-    bottom: 1080,
-    left: 0,
-    dpiScale: 1.25,
-    height: 1080,
-    width: 1920
-},*/
     const activeDisplay = displays.find((display) => {
         return mousePos.x >= display.left && mousePos.x <= display.right && mousePos.y >= display.top && mousePos.y <= display.bottom;
     });
-
-    console.log(`Active display: ${JSON.stringify(activeDisplay)}`);
-
 
     // screenshot({ format: 'png' }).then((img) => {
     //     fs.writeFileSync('screenshot2.png', img);
@@ -78,12 +61,9 @@ const captureActiveWindowText = async () => {
         height: bounds.height * desktopScaleFactor,
     };
 
-    console.log(`Active window: ${JSON.stringify(activeWindow)}`, bounds);
 
     const img = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
 
-
-    // Convert the raw pixel buffer to PNG using sharp
     const pngBuffer = await sharp(img.image, {
         raw: {
             width: img.width,
@@ -92,7 +72,7 @@ const captureActiveWindowText = async () => {
         }
     }).png().toBuffer();
 
-    fs.writeFileSync('screenshot.png', pngBuffer);
+    fs.writeFileSync(screenshotPath, pngBuffer);
     const cursorPosScreen = robot.getMousePos();
     const cursorPos = {
         x: ((cursorPosScreen.x * desktopScaleFactor) - bounds.x),
@@ -103,168 +83,150 @@ const captureActiveWindowText = async () => {
     // const ret = await worker.recognize(pngBuffer);
     // let newText = ret.data.text.trim();
     // let words = ret.data.words;
-    const gCloudTest = await fetchScreenTextsGoogle();
+    const gCloudTest = await proceedGoogleVision();
     let newText = gCloudTest.map(o => o.text).join(" ");
     let words = gCloudTest;
 
-    const savedTexts = JSON.parse(fs.readFileSync('text.json', 'utf8') ?? "[]");
-    const latestText = savedTexts?.length > 0 ? savedTexts[savedTexts.length - 1] : { text: "" };
 
-    if (latestText?.text != newText) {
+    let results: any[] = [];
+    for (let word of words) {
 
-        let results: any[] = [];
-        for (let word of words) {
+        if (word.text.length > 100) continue;
 
-            if (word.text.length > 100) continue;
+        const x1 = word.bbox.x0
+        const y1 = word.bbox.y0;
+        const width = (word.bbox.x1 - word.bbox.x0);
+        results.push({
+            x: x1,
+            y: y1,
+            width,
+            height: word.bbox.y1 - word.bbox.y0,
+            text: word.text,
+        } as ScreenTextData);
+    }
 
-            const x1 = word.bbox.x0
-            const y1 = word.bbox.y0;
-            const width = (word.bbox.x1 - word.bbox.x0);
-            results.push({
-                x: x1,
-                y: y1,
-                width,
-                height: word.bbox.y1 - word.bbox.y0,
-                text: word.text,
-            } as ScreenTextData);
+    // // order results by same line +-5 and then by x position
+    // results = results.sort((o1, o2) => {
+    //     const y1 = o1.y;
+    //     const y2 = o2.y;
+    //     const x1 = o1.x;
+    //     const x2 = o2.x;
+
+    //     if (Math.abs(y1 - y2) <= 2) {
+    //         return x1 - x2;
+    //     }
+
+    //     return y1 - y2;
+    // });
+
+
+    // find result that is closest to cursor by checking if cursor is within x and y of the result
+    let textNearCursor: ScreenTextData | undefined = undefined;
+    for (let result of results) {
+        const x1 = result.x;
+        const y1 = result.y;
+        const x2 = x1 + result.width;
+        const y2 = y1 + result.height;
+
+        if (cursorPos.x >= x1 && cursorPos.x <= x2 && cursorPos.y >= y1 && cursorPos.y <= y2) {
+            textNearCursor = result;
+            break;
+        }
+    }
+
+    // find result that is closest to captured keys starting from all words to seek a match with the captured keys then remove one word at a time until a match is found  
+    const mergedWords = results.map(o => o.text).join(" ");
+    let capturedKeysCopy = capturedKeys ?? textNearCursor?.text ?? "";
+    let foundWords = "";
+
+    while (capturedKeysCopy.length > 0) {
+        if (mergedWords.includes(capturedKeysCopy)) {
+            foundWords = capturedKeysCopy;
+            break;
         }
 
-        // // order results by same line +-5 and then by x position
-        // results = results.sort((o1, o2) => {
-        //     const y1 = o1.y;
-        //     const y2 = o2.y;
-        //     const x1 = o1.x;
-        //     const x2 = o2.x;
+        capturedKeysCopy = capturedKeysCopy.substring(0, capturedKeysCopy.length - 1);
+    }
 
-        //     if (Math.abs(y1 - y2) <= 2) {
-        //         return x1 - x2;
-        //     }
+    const splittedCapturedKeys = foundWords.split(" ");
+    const lastWord = splittedCapturedKeys[splittedCapturedKeys.length - 1];
+    const positionsWithLastWord = results.filter(o => o.text == lastWord).map(o => results.indexOf(o));
 
-        //     return y1 - y2;
-        // });
+    // iterate over positionsWithLastWord by checking if the word before  until one left
+    let exact_positions_word: ScreenTextData | undefined = undefined;
 
+    for (let i = positionsWithLastWord.length - 1; i >= 0; i--) {
+        const position = positionsWithLastWord[i];
+        const word = results[position];
+        const wordBefore = results[position - 1];
 
-        // find result that is closest to cursor by checking if cursor is within x and y of the result
-        let textNearCursor: ScreenTextData | undefined = undefined;
-        for (let result of results) {
-            const x1 = result.x;
-            const y1 = result.y;
-            const x2 = x1 + result.width;
-            const y2 = y1 + result.height;
-
-            if (cursorPos.x >= x1 && cursorPos.x <= x2 && cursorPos.y >= y1 && cursorPos.y <= y2) {
-                textNearCursor = result;
-                break;
-            }
+        if (wordBefore && wordBefore.text == splittedCapturedKeys[splittedCapturedKeys.length - 2]) {
+            exact_positions_word = word;
+            break;
         }
+    }
 
-        console.log(`Text near cursor: ${JSON.stringify(textNearCursor)}`);
-
-        return;
-
-        // find result that is closest to captured keys starting from all words to seek a match with the captured keys then remove one word at a time until a match is found  
-        const mergedWords = results.map(o => o.text).join(" ");
-        let capturedKeysCopy = capturedKeys;
-        let foundWords = "";
-
-        while (capturedKeysCopy.length > 0) {
-            if (mergedWords.includes(capturedKeysCopy)) {
-                foundWords = capturedKeysCopy;
-                break;
-            }
-
-            capturedKeysCopy = capturedKeysCopy.substring(0, capturedKeysCopy.length - 1);
+    const result = {
+        date: new Date(), ...{
+            text_screen: newText,
+            text_of_interest: newText.split(exact_positions_word?.text ?? textNearCursor?.text ?? "")[0],
+            cursor_position: cursorPos,
+            last_written_text: capturedKeys,
+            // words_bounding_boxes: results,
+            text_near_cursor: textNearCursor,
+            caret_position: exact_positions_word,
         }
-
-        const splittedCapturedKeys = foundWords.split(" ");
-        const lastWord = splittedCapturedKeys[splittedCapturedKeys.length - 1];
-        const positionsWithLastWord = results.filter(o => o.text == lastWord).map(o => results.indexOf(o));
-
-        // iterate over positionsWithLastWord by checking if the word before  until one left
-        let exact_positions_word: ScreenTextData | undefined = undefined;
-
-        for (let i = positionsWithLastWord.length - 1; i >= 0; i--) {
-            const position = positionsWithLastWord[i];
-            const word = results[position];
-            const wordBefore = results[position - 1];
-
-            if (wordBefore && wordBefore.text == splittedCapturedKeys[splittedCapturedKeys.length - 2]) {
-                exact_positions_word = word;
-                break;
-            }
-        }
-
-        savedTexts.push({
-            date: new Date(), ...{
-                text_screen: newText,
-                cursor_position: cursorPos,
-                last_written_text: capturedKeys,
-                words_bounding_boxes: results,
-                // hocr: ret.data.hocr,
-                text_near_cursor: textNearCursor,
-                exact_positions_word: exact_positions_word,
-            }
-        });
-
-        const saveText = JSON.stringify(savedTexts);
-        fs.writeFileSync('text.json', saveText);
-        console.log(`New text!!`);
-    }
-
-    // await worker.terminate();
-
-    return newText;
-};
-
-
-const keyListener = new GlobalKeyboardListener();
-
-keyListener.addListener((e) => {
-    if (e.state.toLowerCase() != "up") {
-        return;
-    }
-
-    const name = e.name.toLowerCase();
-
-    if (e.name.toLowerCase() == "backspace") {
-        capturedKeys = capturedKeys.substring(0, capturedKeys.length - 1);
-    }
-
-    if (e.name.toLowerCase() == "space") {
-        capturedKeys += " ";
-    }
-
-    if (e.name.toLowerCase() == "enter") {
-        capturedKeys += "\n";
-    }
-
-    if (e.name.toLowerCase() == "tab") {
-        capturedKeys += " ";
-    }
-
-    if (e.name.length == 1) {
-        capturedKeys += name;
-    }
-
-    debouncedCaptureActiveWindowText();
-});
-
-// debounce function to call captureActiveWindowText after 200ms release of key
-const debounce = (func, delay) => {
-    let debounceTimer;
-    return function () {
-        const context = this;
-        const args = arguments;
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => func.apply(context, args), delay);
     };
+    // await worker.terminate();
+    capturedKeys = "";
+    if(callback) callback(result);
+    return result;
 };
 
-const debouncedCaptureActiveWindowText = debounce(captureActiveWindowText, 1000);
+export function startObserving(callback: (data: any) => void) {
+    const keyListener = new GlobalKeyboardListener();
 
-// process.on('exit', () => {
-//     keyListener.stopListening();
-// });
+    keyListener.addListener((e) => {
+        if (e.state.toLowerCase() != "up") {
+            return;
+        }
+
+        const name = e.name.toLowerCase();
+
+        if (name == "backspace") {
+            capturedKeys = capturedKeys.substring(0, capturedKeys.length - 1);
+        }
+
+        if (name == "space") {
+            capturedKeys += " ";
+        }
+
+        if (name == "enter") {
+            capturedKeys += "\n";
+        }
+
+        if (name == "tab") {
+            capturedKeys += " ";
+        }
+
+        if (e.name.length == 1) {
+            capturedKeys += name;
+        }
+
+        debounce(callback);
+    });
+}
+
+let timeout: any = undefined;
+function debounce(callback: (data: any) => void) {
+    if (timeout) {
+        clearTimeout(timeout);
+    }
+
+    timeout = setTimeout(() => {
+        getDesktopData(callback);
+    }, 2000);
+}
 
 
 interface ScreenTextData {
@@ -273,62 +235,4 @@ interface ScreenTextData {
     y: number;
     width: number;
     height: number;
-}
-
-interface BoundingTexts {
-    text: string;
-    bbox: {
-        x0: number;
-        y0: number;
-        x1: number;
-        y1: number;
-    }
-}
-
-function levenshteinDistance(s1, s2) {
-    // Tokenize the input strings into arrays of words or characters
-    const tokens1 = s1.split(" ");
-    const tokens2 = s2.split(" ");
-
-    // Count the frequency of each token in each string
-    const freq1 = {};
-    const freq2 = {};
-
-    tokens1.forEach((token) => {
-        freq1[token] = (freq1[token] || 0) + 1;
-    });
-
-    tokens2.forEach((token) => {
-        freq2[token] = (freq2[token] || 0) + 1;
-    });
-
-    // Calculate the dot product of the two frequency vectors
-    let dotProduct = 0;
-    for (const token in freq1) {
-        if (freq2[token]) {
-            dotProduct += freq1[token] * freq2[token];
-        }
-    }
-
-    // Calculate the magnitude of each frequency vector
-    let mag1 = 0;
-    let mag2 = 0;
-
-    for (const token in freq1) {
-        mag1 += freq1[token] * freq1[token];
-    }
-
-    for (const token in freq2) {
-        mag2 += freq2[token] * freq2[token];
-    }
-
-    mag1 = Math.sqrt(mag1);
-    mag2 = Math.sqrt(mag2);
-
-    // Calculate the cosine similarity
-    if (mag1 === 0 || mag2 === 0) {
-        return 0; // Handle the case of zero magnitude vectors
-    } else {
-        return dotProduct / (mag1 * mag2);
-    }
 }
